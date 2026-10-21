@@ -7,6 +7,7 @@
 ## 目录 / Contents
 1. [ai-watermark-margin — AI 水印留白裁剪](#1-ai-watermark-margin)
 2. [consistent-character-mv-anchor — MV 角色锚点一致性](#2-consistent-character-mv-anchor)
+3. [mv-shot-audit — MV 成片审计与参考片拆解](#3-mv-shot-audit)
 
 ---
 
@@ -65,8 +66,38 @@ AI 图像编辑 / 生成通道（Miora 等）会在输出图上盖一个生成�
 
 ---
 
+## 3. mv-shot-audit
+
+**一句话**：用纯本地、0 积分的两套 harness，对 MV 成片做「双对照硬条款」验收，并量化拆解参考片的镜头语法。
+
+### 问题
+MV 成片验收容易「假通过」：判据只写阳性对照、读不到输入就当通过、FAIL 被降级成 PARTIAL。一次质量事故（v1 把 6 项 SKIP 仍报全过）暴露了这套漏洞。
+
+### 方法：三条永久硬条款（核心贡献）
+1. **每项判据必须双对照**：阳性对照（注入已知异常 ⇒ 必须报 FAIL）+ 阴性对照（注入已知合规 ⇒ 必须报 MISS）。只有阳性 = 恒真 = 不可用。
+2. **summary flag 必须与实测耦合**：零实测闸门时所有 `all_*` flag 一律 false；有 SKIP/UNUSABLE ⇒ 整单最高 PARTIAL，列明未执行项。
+3. **FAIL 不许降级**：状态机只有 PASS / FAIL / UNUSABLE / INFO，没有 PARTIAL 降级通道；缺输入 ⇒ UNUSABLE，不是 PARTIAL。
+
+### 两套 harness（0 积分、不装包、不碰出图通道）
+- `mv_audit.py`：成片 9 项判据验收（文件指纹、资产零引用、按句切图、角落露出、呼吸包络、画中画碰撞+脉冲、逐句时序、逐像素回归、旧片 SHA）。支持 `--baseline` 做新旧片像素级回归。
+- `mv_ref.py`：参考片拆解——多阈值切镜时间轴 + 切点差分复核、镜头时长/段密度/事件率、运动强度、逐段色彩（HSV/lum）、关键帧 contact 板。所有统计按秒归一化（跨帧率可比）。
+
+### 踩过的坑（节选）
+- **恒真判据**：`if True: return PASS` 也能"检出命中"——只有双对照都过才证明判据在测东西。
+- **fail-open 伪装**：读不到输入 = 0 命中 = 通过，把漏扫伪装成通过 ⇒ 读不到一律 FAIL/UNUSABLE。
+- **BGR/RGB 陷阱**：cv2 原始帧是 BGR，配 RGB 参考色会得到完全不同形状的曲线。
+- **8bit 量化抹平单像素差**：注入异常要用 32×32 块 +60 量级，否则 maxdiff=0 假阴性。
+- **基线用被注入值自身**：任何"基线由被测量对象算出"的判据都会被注入吃掉误差 ⇒ 基线用固定锚（起始帧/相邻中位数）。
+- **阈值穿越型误报**：过场跃升只有 3-4 帧 ⇒ 用持续升沿（RUN=5、每帧升幅≥0.020）天然排除。
+
+### 边界 / 伦理
+- 只做审计，不改渲染引擎、不覆盖成片、不靠放宽阈值变绿；判据错了报出来由设计端定。
+- 公开版已泛化具体项目资产名/代号；完整判据口径与脚本见本地 `mv-shot-audit` skill（待独立发布）。
+
+---
+
 ## 发布状态 / Publish status
-- 两项技术均已作为独立 skill 发布到 GitHub（CatsMansion org）。
+- `ai-watermark-margin`、`consistent-character-mv-anchor` 两项技术已作为独立 skill 发布到 GitHub（CatsMansion org）；`mv-shot-audit` 为本次新增总结、待独立发布。
 - agentskill.sh 首次导入仍受平台侧 GitHub 429 限流影响，需在浏览器手动 Connect GitHub + import（webhook 已挂两个 skill 仓库，import 后自动同步后续 push）。
 
 ## License
@@ -79,3 +110,5 @@ MIT
 **ai-watermark-margin** — Drop AI generator watermarks losslessly. Pad a blank margin (~10%) around the canvas *before* sending the image to an AI editor, so the generator's stamp lands in the margin; crop the margin back off afterward. Watermark gone, content intact. Key fix: `crop_margin.py` must take the *known* margin color explicitly (corner-guessing fails on one-sided margins). Positive/negative controls both pass.
 
 **consistent-character-mv-anchor** — Keep a character identity-consistent across MV frames/video. Lock a reference anchor image + image-to-image for identity; dual-criteria chroma key (border flood-fill + color distance) keeps only the largest connected foreground component to drop background watermarks/specks; programmatic feature locking + static-region lock + composition-baseline measurement (`measure_bbox.py`) for frame-to-frame stability. Self-tested on 512 synthetic frames: 0 leftover background/watermark pixels.
+
+**mv-shot-audit** — Zero-cost local audit of finished MV cuts (9 criteria, mandatory dual controls: positive must detect the injected anomaly → FAIL, negative must MISS → PASS; summary flags coupled to real measurements, no FAIL downgrade) plus reference-video shot-grammar deconstruction (cut timeline, motion, per-segment color), all ffmpeg/ffprobe + numpy/cv2/PIL. Born from a false-pass incident; the dual-control methodology is the transferable core.
